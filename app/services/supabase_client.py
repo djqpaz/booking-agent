@@ -192,6 +192,45 @@ class SupabaseClient:
         except Exception as e:
             logger.error("get_conversation_messages_failed", error=str(e))
             raise
+
+    async def get_message(self, message_id: str) -> Optional[Dict[str, Any]]:
+        """Get a single message by ID"""
+        try:
+            result = self.client.table("messages").select("*").eq("id", message_id).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error("get_message_failed", error=str(e), message_id=message_id)
+            raise
+
+    async def update_message(self, message_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Update arbitrary fields on a message (e.g. metadata)"""
+        try:
+            result = (
+                self.client.table("messages")
+                .update(fields)
+                .eq("id", message_id)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error("update_message_failed", error=str(e), message_id=message_id)
+            raise
+
+    async def list_messages_by_status(self, status: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """List messages filtered by their metadata.status field (e.g. 'pending_approval')"""
+        try:
+            result = (
+                self.client.table("messages")
+                .select("*")
+                .eq("metadata->>status", status)
+                .order("created_at", desc=False)
+                .limit(limit)
+                .execute()
+            )
+            return result.data
+        except Exception as e:
+            logger.error("list_messages_by_status_failed", error=str(e), status=status)
+            raise
     
     # ===== BOOKINGS =====
     

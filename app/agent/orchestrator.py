@@ -501,6 +501,15 @@ class BookingAgent:
             for message in new_messages:
                 if isinstance(message, AIMessage):
                     # This is the agent's response
+                    if state.get("requires_human_approval"):
+                        message_metadata = {
+                            "status": "pending_approval",
+                            "to_email": state.get("sender_email"),
+                            "in_reply_to": state.get("original_message_id"),
+                            "subject": state.get("original_subject"),
+                        }
+                    else:
+                        message_metadata = {"status": "sent"}
                     await supabase_client.create_message(
                         conversation_id=state["conversation_id"],
                         sender_type="agent",
@@ -508,7 +517,7 @@ class BookingAgent:
                         sender_name="Booking Agent",
                         content=message.content,
                         role="assistant",
-                        metadata={"status": "pending_approval"} if state.get("requires_human_approval") else {"status": "sent"}
+                        metadata=message_metadata
                     )
                 elif isinstance(message, HumanMessage):
                     # This is the user's message
