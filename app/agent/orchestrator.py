@@ -135,16 +135,12 @@ class BookingAgent:
         else:
             state["intent"] = "general"
 
-        # Fetch band member emails from Supabase band_members table
-        sender_email = (state.get("sender_email") or "").lower()
+        # Resolve sender identity from the same source of truth everywhere (webhook,
+        # chat, orchestrator) rather than trusting whatever sender_type the caller passed in.
         is_first_message = len(state.get("messages", [])) <= 1
-        try:
-            band_members = await supabase_client.get_band_members()
-            band_member_emails = [bm["email"].lower() for bm in band_members if bm.get("email")]
-        except Exception as e:
-            logger.error("Failed to fetch band member emails", error=str(e))
-            band_member_emails = []
-        if sender_email not in band_member_emails and is_first_message:
+        sender_is_band_member = await supabase_client.is_band_member(state.get("sender_email"))
+        state["sender_type"] = "band_member" if sender_is_band_member else "venue"
+        if not sender_is_band_member and is_first_message:
             state["intent"] = "venue_inquiry"
         
         logger.info("Intent classified", intent=state["intent"])

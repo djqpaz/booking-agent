@@ -255,7 +255,7 @@ class SupabaseClient:
             logger.info(
                 "booking_created",
                 booking_id=result.data[0]["id"],
-                event_date=event_date.isoformat()
+                agreed_date=agreed_date.isoformat() if agreed_date else None
             )
             return result.data[0]
         except Exception as e:
@@ -374,6 +374,22 @@ class SupabaseClient:
         except Exception as e:
             logger.error("get_band_members_failed", error=str(e))
             raise
+
+    async def is_band_member(self, email: Optional[str]) -> bool:
+        """Single source of truth for whether an email belongs to a known band member.
+
+        Used consistently across the webhook, orchestrator, and any other entry point
+        so a sender is never classified as a venue in one place and a band member in another.
+        """
+        if not email:
+            return False
+        try:
+            band_members = await self.get_band_members()
+        except Exception as e:
+            logger.error("is_band_member_check_failed", error=str(e), email=email)
+            return False
+        band_member_emails = {bm["email"].lower() for bm in band_members if bm.get("email")}
+        return email.lower() in band_member_emails
     
     # ===== CONTRACTS =====
     

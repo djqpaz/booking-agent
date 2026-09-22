@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request, HTTPException, Header
 import structlog
 import json
 from app.services.email_service import email_service
+from app.services.supabase_client import supabase_client
 from app.config import settings
 from app.utils.webhook_signature import verify_svix_signature
 
@@ -80,8 +81,9 @@ async def email_webhook(request: Request, svix_signature: str = Header(None, ali
             message_content=message_content
         )
 
-        # Determine sender type (simple heuristic: if to band email, treat as venue)
-        sender_type = "venue"
+        # Determine sender type from the same source of truth the orchestrator uses,
+        # so a band member replying by email isn't mislabeled as a venue in the DB.
+        sender_type = "band_member" if await supabase_client.is_band_member(sender_email) else "venue"
 
         agent_result = await booking_agent.process_message(
             message_content=message_content,
