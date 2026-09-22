@@ -92,9 +92,18 @@ async def email_webhook(request: Request, svix_signature: str = Header(None, ali
         )
 
         agent_reply = agent_result.get("response")
+        requires_human_approval = agent_result.get("requires_human_approval")
 
-        # Send reply email if agent generated a response
-        if agent_reply and sender_email:
+        if requires_human_approval:
+            logger.info(
+                "agent_reply_held_for_approval",
+                to=sender_email,
+                conversation_id=agent_result.get("conversation_id"),
+                next_action=agent_result.get("next_action"),
+            )
+
+        # Send reply email if agent generated a response and it doesn't need a human to review it first
+        if agent_reply and sender_email and not requires_human_approval:
             # Always use message_id from inbound email for threading
             in_reply_to = None
             references = None
@@ -120,7 +129,11 @@ async def email_webhook(request: Request, svix_signature: str = Header(None, ali
             logger.info("agent_reply_sent", to=sender_email, in_reply_to=in_reply_to, references=references)
 
         logger.info("email_webhook_processed", sender=sender_email, subject=parsed_email.get("subject"))
-        return {"status": "processed", "parsed": parsed_email, "agent_reply": agent_reply}
+        return {
+            "status": "pending_approval" if requires_human_approval else "processed",
+            "parsed": parsed_email,
+            "agent_reply": agent_reply,
+        }
 
     except Exception as e:
         logger.error("email_webhook_error", error=str(e))

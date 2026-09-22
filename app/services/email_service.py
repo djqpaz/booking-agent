@@ -24,7 +24,6 @@ class EmailService:
             api_key: Resend API key (defaults to settings.resend_api_key)
         """
         api_key = api_key or settings.resend_api_key
-        print("[DEBUG] RESEND_API_KEY loaded:", api_key)  # Debug print for troubleshooting
         if not api_key:
             logger.warning("RESEND_API_KEY not set - email sending will fail")
         else:

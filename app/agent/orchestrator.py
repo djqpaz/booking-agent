@@ -39,6 +39,7 @@ class AgentState(TypedDict):
     booking_constraints: list[dict]
     requires_human_approval: bool
     next_action: str | None
+    history_length: int
 
 
 class BookingAgent:
@@ -494,8 +495,10 @@ class BookingAgent:
         logger.info("Saving to database", conversation_id=state["conversation_id"])
         
         try:
-            # Save each new message to the database
-            for message in state["messages"]:
+            # Only persist messages added during this turn - state["messages"] also
+            # contains prior history loaded from the DB, which must not be re-inserted.
+            new_messages = state["messages"][state.get("history_length", 0):]
+            for message in new_messages:
                 if isinstance(message, AIMessage):
                     # This is the agent's response
                     await supabase_client.create_message(
@@ -504,7 +507,8 @@ class BookingAgent:
                         sender_id="booking-agent",
                         sender_name="Booking Agent",
                         content=message.content,
-                        role="assistant"
+                        role="assistant",
+                        metadata={"status": "pending_approval"} if state.get("requires_human_approval") else {"status": "sent"}
                     )
                 elif isinstance(message, HumanMessage):
                     # This is the user's message
@@ -573,7 +577,7 @@ class BookingAgent:
         else:
             # Fetch all previous messages for the conversation from the database
             try:
-                db_messages = await supabase_client.get_messages_by_conversation_id(conversation_id)
+                db_messages = await supabase_client.get_conversation_messages(conversation_id)
                 previous_messages = []
                 for m in db_messages:
                     role = m.get("role", "user")
@@ -612,6 +616,7 @@ class BookingAgent:
             "booking_constraints": [],
             "requires_human_approval": False,
             "next_action": None,
+            "history_length": len(previous_messages),
             "original_message_id": human_message_kwargs.get("message_id"),
             "original_subject": human_message_kwargs.get("subject")
         }
