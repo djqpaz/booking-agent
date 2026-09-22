@@ -5,11 +5,11 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 import structlog
+import dateparser
 from datetime import datetime
 
 from app.services.llm_service import llm_service, LLMMessage
 from app.services.supabase_client import supabase_client
-from app.services.email_service import email_service
 from app.agent.prompts import (
     BASE_SYSTEM_PROMPT,
     INTENT_CLASSIFICATION_PROMPT,
@@ -283,78 +283,88 @@ class BookingAgent:
             missing_details.append("load-in time")
 
         if not missing_details:
-            # All details present, transition to availability check
+            # All details present - check real availability/conflicts before replying,
+            # instead of just promising to check and confirming nothing.
             state["event_type"] = event_details["event_type"]
             state["expected_attendance"] = event_details["expected_attendance"]
             state["payment_offer"] = event_details["payment_offer"]
             state["pa_available"] = event_details["pa_available"]
             state["load_in_time"] = event_details["load_in_time"]
             state["requested_dates"] = event_details["requested_dates"]
-            state["intent"] = "availability_request"
             logger.info("venue_inquiry_complete_details", **event_details)
 
-            # Send confirmation email to requester
+            parsed_event_date = None
+            requested_dates_text = event_details["requested_dates"]
+            if requested_dates_text and requested_dates_text != "(not specified)":
+                first_date_text = requested_dates_text.split(" to ")[0].split(" - ")[0].strip()
+                parsed_dt = dateparser.parse(first_date_text, settings={"PREFER_DATES_FROM": "future"})
+                if parsed_dt:
+                    parsed_event_date = parsed_dt.date()
 
-            try:
-                # Find the original message ID if available
-                original_message_id = None
-                references = None
-                # Search for the last HumanMessage with a message_id in state["messages"]
-                for msg in reversed(state["messages"]):
-                    if isinstance(msg, HumanMessage):
-                        # Try to get message_id from the message itself
-                        msg_id = getattr(msg, "message_id", None)
-                        if msg_id:
-                            original_message_id = msg_id
-                            references = msg_id
-                            break
-                # Fallback: try to get message_id from the parsed_email or state if available
-                if not original_message_id:
-                    original_message_id = state.get("original_message_id") or state.get("message_id")
-                    references = original_message_id
+            availability_note = (
+                "We'll now check the band's availability and get back to you as soon as possible."
+            )
+            if parsed_event_date:
+                try:
+                    conflicts = await supabase_client.check_booking_conflicts(parsed_event_date)
+                except Exception as e:
+                    logger.error("check_booking_conflicts_failed", error=str(e))
+                    conflicts = []
+                try:
+                    availability_rows = await supabase_client.check_band_availability(parsed_event_date)
+                except Exception as e:
+                    logger.error("check_band_availability_failed", error=str(e))
+                    availability_rows = []
+                unavailable_members = [
+                    row["band_members"]["name"]
+                    for row in availability_rows
+                    if row.get("status") == "unavailable" and row.get("band_members")
+                ]
 
-                enthusiastic_intro = (
-                    "🎉 Thank you so much for reaching out to book Sick Day with Ferris! We're thrilled about the possibility of playing at your event. "
-                    "Here's a quick summary of what we've received from you so far:"
-                )
-                confirmation_message = (
-                    f"{enthusiastic_intro}\n\n"
-                    f"Event Type: {event_details['event_type']}\n"
-                    f"Expected Attendance: {event_details['expected_attendance']}\n"
-                    f"Payment Offer: {event_details['payment_offer']}\n"
-                    f"PA Available: {event_details['pa_available']}\n"
-                    f"Load-in Time: {event_details['load_in_time']}\n"
-                    f"Requested Dates: {event_details['requested_dates']}\n\n"
-                    "We'll now check the band's availability and get back to you as soon as possible. If you have any more details or questions, just reply to this email!\n\n"
-                    "Thanks again for considering us – we can't wait to (hopefully) rock your event!"
-                )
-                # Use the original subject for threading
-                original_subject = None
-                for msg in reversed(state["messages"]):
-                    if isinstance(msg, HumanMessage):
-                        original_subject = getattr(msg, "subject", None)
-                        if original_subject:
-                            break
-                # Fallback: try to get subject from state if available
-                if not original_subject:
-                    original_subject = state.get("original_subject") or state.get("subject") or "Booking Inquiry"
+                if conflicts:
+                    availability_note = (
+                        f"Heads up - we already have another booking on {parsed_event_date.strftime('%B %d, %Y')}, "
+                        "so we need to double check internally before we can confirm this date."
+                    )
+                    state["requires_human_approval"] = True
+                    state["next_action"] = "availability_conflict"
+                elif unavailable_members:
+                    are_is = "is" if len(unavailable_members) == 1 else "are"
+                    availability_note = (
+                        f"Just a heads-up - {', '.join(unavailable_members)} {are_is} marked unavailable on "
+                        f"{parsed_event_date.strftime('%B %d, %Y')}, so we're confirming with the full band before locking anything in."
+                    )
+                    state["requires_human_approval"] = True
+                    state["next_action"] = "availability_conflict"
+                else:
+                    availability_note = (
+                        f"Good news - we don't see any conflicts on {parsed_event_date.strftime('%B %d, %Y')} so far. "
+                        "We'll confirm with the full band and get back to you shortly."
+                    )
 
-                await email_service.send_email(
-                    to=[state["sender_email"]],
-                    subject=original_subject,
-                    html=f"<p>{confirmation_message.replace(chr(10), '<br>')}</p>",
-                    text=confirmation_message,
-                    metadata={
-                        "conversation_id": state["conversation_id"],
-                        "message_type": "venue_inquiry_confirmation"
-                    },
-                    in_reply_to=original_message_id,
-                    references=references
-                )
-                logger.info("venue_inquiry_confirmation_sent", to=state["sender_email"], conversation_id=state["conversation_id"], in_reply_to=original_message_id)
-            except Exception as e:
-                logger.error("venue_inquiry_confirmation_failed", error=str(e), to=state["sender_email"], conversation_id=state["conversation_id"])
+            enthusiastic_intro = (
+                "🎉 Thank you so much for reaching out to book Sick Day with Ferris! We're thrilled about the possibility of playing at your event. "
+                "Here's a quick summary of what we've received from you so far:"
+            )
+            confirmation_message = (
+                f"{enthusiastic_intro}\n\n"
+                f"Event Type: {event_details['event_type']}\n"
+                f"Expected Attendance: {event_details['expected_attendance']}\n"
+                f"Payment Offer: {event_details['payment_offer']}\n"
+                f"PA Available: {event_details['pa_available']}\n"
+                f"Load-in Time: {event_details['load_in_time']}\n"
+                f"Requested Dates: {event_details['requested_dates']}\n\n"
+                f"{availability_note} If you have any more details or questions, just reply to this email!\n\n"
+                "Thanks again for considering us – we can't wait to (hopefully) rock your event!"
+            )
 
+            state["messages"] = state["messages"] + [AIMessage(content=confirmation_message)]
+            logger.info(
+                "venue_inquiry_confirmation_drafted",
+                conversation_id=state["conversation_id"],
+                requires_human_approval=state.get("requires_human_approval", False),
+                parsed_event_date=str(parsed_event_date) if parsed_event_date else None
+            )
             return state
         else:
             follow_up = "To proceed, could you please provide the following details: " + ", ".join(missing_details) + "."
